@@ -2,13 +2,13 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
 import concurrent.futures
 
 st.set_page_config(page_title="Radar Saham 3-in-1", layout="wide")
 st.title("🚀 Master Screener Saham 3-in-1")
 st.markdown("Mencari Peluang: **⭐ Trend Follower | ✅ Pullback (Diskon) | 🔥 Bottom Fishing**")
 
+# Daftar 400 Saham Terbesar BEI
 stocks = [
     "BBCA", "DCII", "BBRI", "BYAN", "BMRI", "BREN", "AMMN", "MORA", "TLKM", "DSSA",
     "ASII", "SRAJ", "TPIA", "DNET", "BRPT", "SMMA", "BBNI", "EMAS", "MPRO", "CASA",
@@ -54,26 +54,28 @@ stocks = [
 
 @st.cache_data(ttl=3600)
 def get_benchmark():
-    start_date = datetime.today() - timedelta(days=3650)
-    end_date = datetime.today()
     try:
-        bench_data = yf.download(["^JKSE", "^GSPC"], start=start_date, end=end_date, progress=False)['Close']
+        # Menggunakan period="10y" (Kebal Zona Waktu)
+        bench_data = yf.download(["^JKSE", "^GSPC"], period="10y", progress=False)['Close']
         return bench_data.pct_change().dropna()
     except:
         return pd.DataFrame()
 
 def analisis_saham(ticker, bench_returns):
     symbol = f"{ticker}.JK"
-    hasil = None
-    start_date = datetime.today() - timedelta(days=3650)
-    end_date = datetime.today()
     
     try:
-        df = yf.download(symbol, start=start_date, end=end_date, progress=False)
+        # Menggunakan period="10y" agar zona waktu server Streamlit (UTC) tidak memotong data hari ini
+        df = yf.download(symbol, period="10y", progress=False)
+        
+        # DETEKSI JIKA YAHOO MEMBLOKIR SERVER
+        if df.empty:
+            return "BLOCKED"
+            
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
             
-        if not df.empty and len(df) >= 200:
+        if len(df) >= 200:
             df['MA_50'] = df['Close'].rolling(window=50).mean()
             df['MA_200'] = df['Close'].rolling(window=200).mean()
             df['SMA_20'] = df['Close'].rolling(window=20).mean()
@@ -125,11 +127,17 @@ def analisis_saham(ticker, bench_returns):
             
             if rata_volume < 1000000:
                 return None
-                
-            kriteria_trend = (last['Close'] > last['MA_200']) and (last['MA_50'] > last['MA_200']) and (last['MACD'] > last['Signal_Line']) and (prev['MACD'] <= prev['Signal_Line'])
+            
+            recent_cross = False
+            for i in range(1, 4):
+                if df['MACD'].iloc[-i] > df['Signal_Line'].iloc[-i] and df['MACD'].iloc[-(i+1)] <= df['Signal_Line'].iloc[-(i+1)]:
+                    recent_cross = True
+                    break
+                    
+            kriteria_trend = (last['Close'] > last['MA_200']) and (last['MA_50'] > last['MA_200']) and recent_cross
             kriteria_pullback = (last['Close'] > last['MA_200']) and (last['MA_50'] > last['MA_200']) and (30 <= last['RSI'] <= 45)
             kriteria_bottom = (last['Close'] <= last['Lower_BB'] * 1.01) and (last['RSI'] < 30)
-            kriteria_reversal = (last['MACD'] > last['Signal_Line']) and (prev['MACD'] <= prev['Signal_Line']) and (last['MACD'] < 0)
+            kriteria_reversal = recent_cross and (last['MACD'] < 0)
             kriteria_c_gabungan = kriteria_bottom or kriteria_reversal
 
             kategori = ""
@@ -146,7 +154,7 @@ def analisis_saham(ticker, bench_returns):
                 target_final = target_reversal
 
             if kategori != "":
-                hasil = {
+                return {
                     "Saham": ticker,
                     "Kategori Strategi": kategori,
                     "Beta IHSG": round(beta_ihsg, 2),
@@ -158,25 +166,33 @@ def analisis_saham(ticker, bench_returns):
                     "Cut Loss": stop_loss
                 }
     except Exception:
-        pass 
-    return hasil
+        return "BLOCKED" 
+        
+    return None
 
 if st.button("Jalankan Radar Sekarang (Klik 1x Saja)"):
     with st.spinner('Mesin Server sedang memindai 400 saham (Proses 1-2 menit)...'):
         bench_returns = get_benchmark()
         results = []
+        blocked_count = 0
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+        # Kecepatan ditekan menjadi 10 agar lebih aman dari blokir
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             futures = {executor.submit(analisis_saham, stock, bench_returns): stock for stock in stocks}
             for future in concurrent.futures.as_completed(futures):
                 res = future.result()
-                if res:
+                if res == "BLOCKED":
+                    blocked_count += 1
+                elif res:
                     results.append(res)
                     
-        if results:
+        # SISTEM PERINGATAN BLOKIR YAHOO
+        if blocked_count > 100:
+            st.error("🚨 GAGAL: Server Streamlit sedang dicekal (Rate Limit) oleh sistem anti-spam Yahoo Finance. Silakan coba lagi 1 jam kemudian, atau jalankan melalui CMD lokal di komputer Anda.")
+        elif results:
             res_df = pd.DataFrame(results)
             res_df = res_df.sort_values(by=["Kategori Strategi", "RSI"], ascending=[False, True])
             st.success("✅ Pemindaian Selesai! Berikut rekomendasi sistem:")
             st.dataframe(res_df, use_container_width=True)
         else:
-            st.warning("⚠️ Tidak ada saham yang memenuhi 3 kriteria kuat saat ini (Kondisi Wait & See).")
+            st.warning("⚠️ Tidak ada saham yang memenuhi kriteria kuat saat ini (Kondisi Wait & See).")
